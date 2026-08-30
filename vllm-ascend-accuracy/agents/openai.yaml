@@ -1,0 +1,4 @@
+interface:
+  display_name: "vLLM Ascend 精度修复"
+  short_description: "诊断、修复并验证 vLLM Ascend 推理精度问题"
+  default_prompt: "使用 $vllm-ascend-accuracy 定位并解决这个 vLLM Ascend 精度问题。"
