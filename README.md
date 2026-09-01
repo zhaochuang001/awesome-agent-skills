@@ -35,42 +35,25 @@
 
 > 10.0.0.1 磁盘满了，帮我看看能清什么
 
-## Codex 安装与使用
+## 安装
 
-### 使用 Skill Installer（推荐）
+最简单的方式：**把仓库地址发给 Agent（Codex 或 Claude Code），让它自己装**。
 
-在 Codex 中调用内置安装器，并提供需要安装的 skill 的 GitHub 目录地址：
-
-```text
-$skill-installer
-
-请从下面的 GitHub 地址安装 skill：
-https://github.com/zhaochuang001/awesome-agent-skills/tree/main/vllm-ascend-accuracy
-```
-
-安装完成后，在下一条消息中显式调用：
+安装全部 skill：
 
 ```text
-$vllm-ascend-accuracy 帮我修复一个 vLLM Ascend 精度问题
+把 https://github.com/zhaochuang001/awesome-agent-skills 里的所有 skill 安装到你的 skills 目录
 ```
 
-也可以直接描述匹配的任务，让 Codex 根据 `description` 自动选择 skill。输入 `$` 或使用 `/skills` 可以查看当前可用的 skills；新安装的 skill 未出现时，请新建任务或重启 Codex。
-
-### 手动安装
-
-不使用安装器时，将整个 skill 目录复制到 Codex 的 skills 目录：用户级 `~/.agents/skills/<skill-name>/`，项目级 `<project>/.agents/skills/<skill-name>/`。命令见下方[「手动安装」](#手动安装)。
-
-## Claude Code 安装与使用
-
-将整个 skill 目录复制到 Claude Code 的 skills 目录：用户级 `~/.claude/skills/<skill-name>/`，项目级 `<project>/.claude/skills/<skill-name>/`。命令见下方[「手动安装」](#手动安装)。
-
-在 Claude Code 中显式调用：
+安装指定 skill：
 
 ```text
-/vllm-ascend-accuracy 帮我修复一个 vLLM Ascend 精度问题
+把 https://github.com/zhaochuang001/awesome-agent-skills/tree/main/vllm-ascend-accuracy 安装到你的 skills 目录
 ```
 
-Claude Code 也可以根据 skill 的 `description` 自动调用。使用 `/skills` 检查是否加载成功；如果 skills 顶层目录是在当前会话启动后首次创建的，请重启 Claude Code。
+Codex 也可以用内置安装器：输入 `$skill-installer` 并提供上面的目录地址。
+
+安装完成后**新开会话**即可使用（skill 列表在会话启动时加载）；之后直接描述任务触发，或用 `/skill-name` 显式调用。不经过 Agent 的环境参考下方「手动安装」。
 
 ## 手动安装
 
