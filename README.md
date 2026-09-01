@@ -11,6 +11,68 @@
 
 每个一级目录都是一个可独立安装的 skill，入口文件为该目录中的 `SKILL.md`。
 
+## 各 Skill 调用示例
+
+四种触发方式从左到右递进：**自然语言**（Agent 按 `description` 自动选择）→ **显式调用**（`/skill-name`）→ **命令行**（直接跑 skill 自带脚本，Windows 用 `py -3`，macOS/Linux 用 `python3`，下文以 `py -3` 为例；脚本路径相对 skill 根目录）。
+
+### vllm-ascend-accuracy
+
+纯指令型 skill（无独立脚本），描述任务即可触发：
+
+```text
+80.5.9.126 容器里的 vllm 输出乱码/复读，帮我排查修复。
+验收标准：xxx 数据集分数恢复到 0.85 以上。
+```
+
+### server-management
+
+```bash
+# 添加服务器（密码仅本次使用，装完公钥后永久密钥认证）
+py -3 scripts/machine_add.py --host 10.0.0.1 --password 'xxx'
+
+# 验证 / 移除
+py -3 scripts/machine_verify.py --machine 10.0.0.1
+py -3 scripts/machine_remove.py --machine 10.0.0.1
+
+# 查询集群：哪些机器有 ≥4 张空闲卡
+py -3 scripts/fleet_cli.py capacity --min-idle 4
+
+# 启动监控面板（浏览器打开 http://127.0.0.1:8790）
+py -3 scripts/fleet_manage.py start
+```
+
+自然语言："帮我加台服务器 10.0.0.1，密码 xxx"、"现在哪些机器有空闲卡？"
+
+### npu-migrate
+
+```bash
+# 先干跑看方案（首次迁移推荐：输出目标机选择、卡映射、将执行的命令）
+py -3 scripts/migrate.py --source 10.0.0.1 --container my-vllm \
+  --code-path /mnt/code --script /workspace/start.sh --plan
+
+# 正式迁移：自动选空闲卡最多的机器，起容器前检查目标机模型权重
+py -3 scripts/migrate.py --source 10.0.0.1 --container my-vllm \
+  --code-path /mnt/code --script /workspace/start.sh \
+  --weights-path /data/weights/MyModel
+```
+
+自然语言："10.0.0.1 的卡被占了，把 my-vllm 容器和 /mnt/code 迁到有空卡的机器，权重在 /data/weights/MyModel"
+
+### disk-cleanup
+
+```bash
+# 只读分析：磁盘全景 + docker 镜像/容器分级清理候选（不动任何东西）
+py -3 scripts/cleanup.py --host 10.0.0.1
+
+# 无损清理：悬空镜像 + 构建缓存
+py -3 scripts/cleanup.py --host 10.0.0.1 --execute-safe
+
+# 确认级清理：删退出超 9 天的容器（先看分析报告再执行）
+py -3 scripts/cleanup.py --host 10.0.0.1 --execute-confirm --days 9
+```
+
+自然语言："10.0.0.1 磁盘满了，帮我看看能清什么"
+
 ## Codex 安装与使用
 
 ### 使用 Skill Installer（推荐）
