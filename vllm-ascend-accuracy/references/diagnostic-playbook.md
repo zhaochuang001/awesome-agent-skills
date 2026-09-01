@@ -95,8 +95,6 @@
 
 ## 官方资料入口
 
-使用时核对目标版本的最新状态与结论：
-
 - 版本策略与兼容矩阵：https://vllm-ascend.readthedocs.io/en/latest/developer_guide/versioning_policy.html
 - vLLM Ascend 仓库：https://github.com/vllm-project/vllm-ascend
 - DP+EP 精度案例：https://github.com/vllm-project/vllm-ascend/issues/2767
