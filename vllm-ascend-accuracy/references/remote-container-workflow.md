@@ -35,7 +35,7 @@
 - 模型服务启动脚本及引用文件、实际 argv、工作目录和必要环境变量；
 - NPU 型号/可见设备、节点/rank 映射、容器挂载、健康状态和相关日志。
 
-装了 server-management skill 时，用本 skill 的 `scripts/env_snapshot.py --host <机器> [--container <容器>]` 一键采集：版本矩阵（vllm/vllm-ascend/torch/torch_npu）、npu-smi 卡状态（24.x/26.x 双格式解析）、driver、容器配置（镜像/挂载/ShmSize/IPC/特权）、昇腾运行时环境变量、运行中 vllm 进程的实际环境与自定义 CANN 库加载数，输出 JSON 存档。诊断前后各拍一次，diff 能发现环境被改动导致的复现失效。未装该 skill 时按下方手工流程采集。
+用本 skill 的 `scripts/env_snapshot.py --host <IP> [--user root] [--port 22] [--container <容器>]` 一键采集：版本矩阵（vllm/vllm-ascend/torch/torch_npu）、npu-smi 卡状态（24.x/26.x 双格式解析）、driver、容器配置（镜像/挂载/ShmSize/IPC/特权）、昇腾运行时环境变量、运行中 vllm 进程的实际环境与自定义 CANN 库加载数，输出 JSON 存档。诊断前后各拍一次，diff 能发现环境被改动导致的复现失效。脚本自包含（内置 SSH 与 npu-smi 解析），唯一前置条件是本机能密钥 SSH 到目标机器；不可用时按下方手工流程采集。
 
 优先运行 `collect_env.py` 一次性收集版本信息：vllm-ascend 源码 checkout 的仓库根目录自带；环境没有时按目标版本从 https://github.com/vllm-project/vllm-ascend/blob/main/collect_env.py 下载后运行，较新 vLLM 也可用 `vllm collect-env` 子命令。诊断快照必须脱敏，不包含密码、token 或受限业务数据。
 

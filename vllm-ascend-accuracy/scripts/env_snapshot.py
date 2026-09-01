@@ -1,55 +1,174 @@
 #!/usr/bin/env python3
 """环境快照：一键冻结精度诊断所需的完整环境信息，输出可存档、可对比的 JSON。
 
+自包含脚本，无外部 skill 依赖——SSH 直连（--host/--user/--port），
+npu-smi 双格式解析器内置（24.x 单 chip / 26.x 双 chip + HBM + 进程表）。
+
 用途（对应 SKILL.md「解决闭环」第 2 步"冻结环境"）：
-- 版本配套矩阵一次采全（vLLM/vllm-ascend/CANN/torch_npu/driver/卡状态），替代手工十几条命令；
+- 版本配套矩阵一次采全（vLLM/vllm-ascend/CANN/torch_npu/driver/卡状态）；
 - 诊断前后各拍一次，diff 能发现"环境被谁动过"（环境漂移是复现失效的头号原因）；
 - 抓运行中 vllm 进程的真实环境变量与库加载计数（CANN 版本切换是否生效的铁证）。
 
-依赖 server-management skill（机器清单、SSH 工具、npu-smi 双格式解析器）；未安装时
-本脚本会提示，v1 的其余流程不受影响（该依赖仅此脚本需要）。
+前置条件：本机能以密钥 SSH 到目标机器（BatchMode 非交互，不弹密码）。
 
-输出协议与 server-management 一致：stderr __SM_PROGRESS__ 进度，stdout 单个最终 JSON。
+输出协议：stderr __SM_PROGRESS__ 进度，stdout 单个最终 JSON。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# 依赖注入：server-management skill 的 scripts 目录
-# ---------------------------------------------------------------------------
+# Windows 上从无控制台进程调 ssh.exe 会闪黑框，CREATE_NO_WINDOW 抑制；POSIX 置 0
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
-def _inject_dependency() -> str:
-    candidates = [
-        Path.home() / ".claude" / "skills" / "server-management" / "scripts",  # Claude Code
-        Path.home() / ".agents" / "skills" / "server-management" / "scripts",  # Codex
-        Path(__file__).resolve().parents[2] / "server-management" / "scripts",  # 仓库开发布局
+def progress(phase: str, detail: str = "") -> None:
+    """stderr 输出阶段进度；stdout 留给最终 JSON。"""
+    event = {"phase": phase, "ts": round(time.time(), 3)}
+    if detail:
+        event["detail"] = detail
+    print(f"__SM_PROGRESS__={json.dumps(event, ensure_ascii=False)}", file=sys.stderr, flush=True)
+
+
+def emit(payload: dict[str, Any]) -> int:
+    """打印最终结果 JSON 并返回退出码。"""
+    payload.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("ok") else 1
+
+
+def run_ssh(host: str, port: int, user: str, command: str, timeout: float = 60.0) -> tuple[int, str, str]:
+    """非交互 SSH 执行（BatchMode 杜绝密码提示；accept-new 首连自动记录指纹）。"""
+    argv = [
+        "ssh", "-p", str(port),
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=10",
+        f"{user}@{host}", command,
     ]
-    for candidate in candidates:
-        if (candidate / "common.py").is_file():
-            sys.path.insert(0, str(candidate))
-            return str(candidate)
-    print(
-        "缺少依赖 skill：server-management（提供机器清单、SSH 与 npu-smi 解析）。"
-        "请先安装 awesome-agent-skills 仓库中的 server-management，"
-        "或按 remote-container-workflow.md 手工采集环境信息。",
-        file=sys.stderr,
+    result = subprocess.run(
+        argv, capture_output=True, text=True, timeout=timeout,
+        check=False, creationflags=_NO_WINDOW,
     )
-    raise SystemExit(2)
+    return result.returncode, result.stdout, result.stderr
 
 
-_inject_dependency()
+def _run(host: str, port: int, user: str, cmd: str, timeout: float = 60.0) -> str:
+    code, out, _err = run_ssh(host, port, user, cmd, timeout=timeout)
+    return out.strip() if code == 0 else ""
 
-from common import emit, find_machine, progress, run_ssh_machine  # noqa: E402
-from npu_probe import parse_npu_smi_output  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# npu-smi 解析器（内置，与 server-management 同源；支持 24.x / 26.x 双格式）
+# ---------------------------------------------------------------------------
+
+# 概要行：| 0     Ascend910  | OK  | 204.0   43   0/0 |（power/temp 可能为 "-"）
+_SUMMARY_RE = re.compile(
+    r"^\|\s*(?P<id>\d+)\s+(?P<name>[A-Za-z0-9][A-Za-z0-9_.\-]*)\s*\|\s*(?P<health>\S+)\s*\|"
+    r"\s*(?P<power>-|\d+\.?\d*)\s+(?P<temp>-|\d+\.?\d*)\s"
+)
+# device 行：col2 必须是严格 bus-id 格式（与概要行/进程行的关键区分）
+_DEVICE_RE = re.compile(
+    r"^\|\s*(?P<chip>\d+)\s+(?P<phy>\d+|NA)\s*\|"
+    r"\s*(?P<bus>[\da-fA-F]{4}:[\da-fA-F]{2}:[\da-fA-F]{2}\.[\da-fA-F])\s*\|"
+    r"\s*(?P<aicore>-|\d+)\s+(?P<rest>[\d\s/]+)\|"
+)
+# 进程行：| 0     0  | 1774110  | VLLMWorker_PP  | 56684  | NA |
+_PROCESS_RE = re.compile(
+    r"^\|\s*(?P<npu>\d+)\s+(?P<chip>\d+)\s+\|\s*(?P<pid>\d+)\s+\|\s*(?P<name>\S+)\s+\|"
+    r"\s*(?P<mem>\d+)\s"
+)
+_PAIR_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+
+
+def parse_npu_smi_output(text: str) -> dict[str, Any]:
+    """把 npu-smi info 输出解析成结构化数据（卡级聚合，26.x 附进程表）。"""
+    npus: dict[int, dict[str, Any]] = {}
+    pending_summary: dict[str, Any] | None = None
+    in_process_section = False
+
+    def card(npu_id: int) -> dict[str, Any]:
+        if npu_id not in npus:
+            npus[npu_id] = {
+                "id": npu_id, "name": None, "health": None, "power_w": None,
+                "temp_c": None, "bus_id": None, "aicore_util": None,
+                "mem_used_mb": None, "mem_total_mb": None, "processes": [],
+            }
+        return npus[npu_id]
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            continue
+        if "Process id" in line:  # 26.x 进程表区域切换
+            in_process_section = True
+            pending_summary = None
+            continue
+        if in_process_section:
+            matched = _PROCESS_RE.match(line)
+            if matched:
+                entry = card(int(matched.group("npu")))
+                entry["processes"].append(
+                    {"pid": int(matched.group("pid")), "name": matched.group("name"),
+                     "memory_mb": int(matched.group("mem"))}
+                )
+            continue
+        matched = _DEVICE_RE.match(line)
+        if matched and pending_summary is not None:
+            pairs = _PAIR_RE.findall(matched.group("rest"))
+            hbm_used, hbm_total = (int(pairs[-1][0]), int(pairs[-1][1])) if pairs else (None, None)
+            chip = {
+                "name": pending_summary["name"], "health": pending_summary["health"],
+                "power_w": pending_summary["power_w"], "temp_c": pending_summary["temp_c"],
+                "bus_id": matched.group("bus"),
+                "aicore_util": None if matched.group("aicore") == "-" else int(matched.group("aicore")),
+                "mem_used_mb": hbm_used, "mem_total_mb": hbm_total,
+            }
+            entry = card(pending_summary["id"])
+            # 卡级聚合：功耗取首个非空、温度/AICore 取各 chip 最大（保守）、显存取最大占用
+            if entry["name"] is None:
+                entry["name"] = chip["name"]
+            if entry["health"] in (None, "OK") and chip["health"] not in (None, "OK"):
+                entry["health"] = chip["health"]
+            elif entry["health"] is None:
+                entry["health"] = chip["health"]
+            if entry["power_w"] is None:
+                entry["power_w"] = chip["power_w"]
+            for field in ("temp_c", "aicore_util"):
+                values = [c.get(field) for c in [chip] if c.get(field) is not None]
+                if values and (entry[field] is None or entry[field] < max(values)):
+                    entry[field] = max(values) if values else entry[field]
+            if chip["mem_used_mb"] is not None:
+                entry["mem_used_mb"] = max(entry["mem_used_mb"] or 0, chip["mem_used_mb"])
+                entry["mem_total_mb"] = chip["mem_total_mb"]
+            if entry["bus_id"] is None:
+                entry["bus_id"] = chip["bus_id"]
+            pending_summary = None
+            continue
+        matched = _SUMMARY_RE.match(line)
+        if matched:
+            pending_summary = {
+                "id": int(matched.group("id")),
+                "name": matched.group("name"),
+                "health": matched.group("health"),
+                "power_w": None if matched.group("power") == "-" else float(matched.group("power")),
+                "temp_c": None if matched.group("temp") == "-" else float(matched.group("temp")),
+            }
+    return {"npu_count": len(npus), "npus": [npus[k] for k in sorted(npus)]}
+
+
+# ---------------------------------------------------------------------------
+# 快照采集
+# ---------------------------------------------------------------------------
 
 # 容器内要采集的 pip 包（存在才记录）
 PACKAGES = [
@@ -63,36 +182,29 @@ ENV_KEYS = [
 ]
 
 
-def _run(machine: dict[str, Any], cmd: str, timeout: float = 60.0) -> str:
-    code, out, _err = run_ssh_machine(machine, cmd, timeout=timeout)
-    return out.strip() if code == 0 else ""
-
-
-def snapshot_host(machine: dict[str, Any]) -> dict[str, Any]:
+def snapshot_host(host: str, port: int, user: str) -> dict[str, Any]:
     """宿主机层：系统、driver、NPU 状态。"""
-    progress("host", "采集宿主机系统与 driver 信息")
-    host: dict[str, Any] = {
-        "host": machine["host"],
-        "alias": machine.get("alias"),
-        "kernel": _run(machine, "uname -r"),
-        "hostname": _run(machine, "hostname"),
+    progress("host", f"采集宿主机 {host} 系统与 driver 信息")
+    info: dict[str, Any] = {
+        "host": host, "user": user,
+        "kernel": _run(host, port, user, "uname -r"),
+        "hostname": _run(host, port, user, "hostname"),
     }
-    # npu-smi：结构化解析（复用 server-management 的 24.x/26.x 双格式解析器）
     progress("host", "采集 npu-smi 卡状态")
-    code, raw, _err = run_ssh_machine(machine, "npu-smi info 2>/dev/null || true", timeout=60)
-    host["npu"] = parse_npu_smi_output(raw) if code == 0 and raw.strip() else {"error": "npu-smi unavailable"}
-    host["npu_raw_output"] = raw[:8000]  # 原始输出截断存档（解析器未覆盖的版本时人工可读）
+    code, raw, _err = run_ssh(host, port, user, "npu-smi info 2>/dev/null || true", timeout=60)
+    info["npu"] = parse_npu_smi_output(raw) if code == 0 and raw.strip() else {"error": "npu-smi unavailable"}
+    info["npu_raw_output"] = raw[:8000]  # 原始输出截断存档（解析器未覆盖的版本时人工可读）
     # driver/firmware：npu-smi 的 board 信息最可靠（version.info 路径各版本不一）
-    board = _run(machine, "npu-smi info -t board -i 0 2>/dev/null | grep -iE 'software version|firmware version'")
-    host["board_versions"] = [line.strip() for line in board.splitlines() if line.strip()]
-    for line in host["board_versions"]:
+    board = _run(host, port, user, "npu-smi info -t board -i 0 2>/dev/null | grep -iE 'software version|firmware version'")
+    info["board_versions"] = [line.strip() for line in board.splitlines() if line.strip()]
+    for line in info["board_versions"]:
         if "software" in line.lower():
-            host["driver_version"] = line.split(":", 1)[-1].strip()
+            info["driver_version"] = line.split(":", 1)[-1].strip()
             break
-    return host
+    return info
 
 
-def snapshot_container(machine: dict[str, Any], container: str) -> dict[str, Any]:
+def snapshot_container(host: str, port: int, user: str, container: str) -> dict[str, Any]:
     """容器层：docker 配置、包版本、运行中 vllm 进程的真实环境。
 
     实现注意（真机验证过的坑）：
@@ -107,8 +219,8 @@ def snapshot_container(machine: dict[str, Any], container: str) -> dict[str, Any
     progress("container", f"采集容器 {container} 配置")
     result: dict[str, Any] = {"name": container}
     # 注意字段顺序：Binds 是唯一内部含空格的 JSON 数组，必须放最后（maxsplit 兜住）
-    code, out, _err = run_ssh_machine(
-        machine,
+    code, out, _err = run_ssh(
+        host, port, user,
         f"docker inspect {container} --format "
         "'{{json .Config.Image}} {{json .Config.Cmd}} {{json .HostConfig.ShmSize}} "
         "{{json .HostConfig.IpcMode}} {{json .HostConfig.Privileged}} "
@@ -131,16 +243,12 @@ def snapshot_container(machine: dict[str, Any], container: str) -> dict[str, Any
     # 容器内的昇腾运行时环境变量 + pip 版本矩阵
     progress("container", "采集容器内包版本与环境变量")
     env_cmd = "env | grep -E '^(" + "|".join(ENV_KEYS) + ")=' | sort"
-    _code, env_out, _e = run_ssh_machine(
-        machine, f"docker exec {container} sh -c {shlex.quote(env_cmd)}", timeout=30
-    )
-    result["runtime_env"] = dict(
-        line.split("=", 1) for line in env_out.splitlines() if "=" in line
-    )
+    _code, env_out, _e = run_ssh(host, port, user, f"docker exec {container} sh -c {shlex.quote(env_cmd)}", timeout=30)
+    result["runtime_env"] = dict(line.split("=", 1) for line in env_out.splitlines() if "=" in line)
 
     # 探测容器内最高版本的 python 绝对路径（无变量展开，安全）
-    _code, py_out, _e = run_ssh_machine(
-        machine,
+    _code, py_out, _e = run_ssh(
+        host, port, user,
         f"docker exec {container} sh -c \"ls /usr/local/python*/bin/python3 2>/dev/null | sort -V | tail -1\"",
         timeout=30,
     )
@@ -155,12 +263,8 @@ def snapshot_container(machine: dict[str, Any], container: str) -> dict[str, Any
         "        pass\n"
         "PYEOF"
     )
-    _code, pkg_out, _e = run_ssh_machine(
-        machine, f"docker exec {container} sh -c {shlex.quote(pkg_cmd)}", timeout=120
-    )
-    result["packages"] = dict(
-        line.split(" ", 1) for line in pkg_out.splitlines() if " " in line
-    )
+    _code, pkg_out, _e = run_ssh(host, port, user, f"docker exec {container} sh -c {shlex.quote(pkg_cmd)}", timeout=120)
+    result["packages"] = dict(line.split(" ", 1) for line in pkg_out.splitlines() if " " in line)
 
     # 运行中 vllm 进程的真实环境与库加载（CANN 切换验证的铁证）。
     # 必须在容器 PID namespace 里找进程——走脚本文件，避免宿主机 shell 抢先展开 $()
@@ -179,12 +283,10 @@ def snapshot_container(machine: dict[str, Any], container: str) -> dict[str, Any
     transfer = "printf '%s\\n' " + " ".join(
         "'" + line.replace("'", "'\\''") + "'" for line in probe_script.splitlines()
     ) + f" > {remote_tmp}"
-    run_ssh_machine(machine, transfer, timeout=30)
-    run_ssh_machine(machine, f"docker cp {remote_tmp} {container}:{remote_tmp}", timeout=30)
-    _code, proc_out, _e = run_ssh_machine(
-        machine, f"docker exec {container} sh {remote_tmp}", timeout=60
-    )
-    run_ssh_machine(machine, f"rm -f {remote_tmp} && docker exec {container} rm -f {remote_tmp}", timeout=30)
+    run_ssh(host, port, user, transfer, timeout=30)
+    run_ssh(host, port, user, f"docker cp {remote_tmp} {container}:{remote_tmp}", timeout=30)
+    _code, proc_out, _e = run_ssh(host, port, user, f"docker exec {container} sh {remote_tmp}", timeout=60)
+    run_ssh(host, port, user, f"rm -f {remote_tmp} && docker exec {container} rm -f {remote_tmp}", timeout=30)
     vllm_proc: dict[str, Any] = {}
     for line in proc_out.splitlines():
         if line.startswith("PID="):
@@ -199,35 +301,33 @@ def snapshot_container(machine: dict[str, Any], container: str) -> dict[str, Any
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="精度诊断环境快照采集（冻结环境用）")
-    parser.add_argument("--host", required=True, help="目标服务器（alias 或 IP，须在 server-management 清单中）")
+    parser = argparse.ArgumentParser(description="精度诊断环境快照采集（自包含，SSH 直连）")
+    parser.add_argument("--host", required=True, help="目标服务器 IP")
+    parser.add_argument("--user", default="root", help="SSH 用户，默认 root")
+    parser.add_argument("--port", type=int, default=22, help="SSH 端口，默认 22")
     parser.add_argument("--container", help="目标容器名（省略则只采宿主机层）")
     parser.add_argument("--out", help="快照 JSON 输出路径（默认当前目录）")
     args = parser.parse_args()
 
-    found = find_machine(args.host)
-    if not found:
+    # 前置：密钥 SSH 可达
+    progress("connect", f"验证 {args.user}@{args.host}:{args.port} 密钥登录")
+    code, _out, err = run_ssh(args.host, args.port, args.user, "echo ok", timeout=20)
+    if code != 0:
         return emit(
             {"ok": False, "action": "env-snapshot", "status": "blocked",
-             "error": f"机器 {args.host} 不在清单中，先用 server-management 添加"}
+             "error": f"SSH 不可达（需密钥认证，不弹密码）：{(err or '').strip()[:200]}"}
         )
-    _index, machine = found
 
-    snapshot: dict[str, Any] = {
-        "action": "env-snapshot",
-        "taken_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    }
-    snapshot["host"] = snapshot_host(machine)
+    snapshot: dict[str, Any] = {"action": "env-snapshot", "taken_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    snapshot["host"] = snapshot_host(args.host, args.port, args.user)
     if args.container:
-        snapshot["container"] = snapshot_container(machine, args.container)
+        snapshot["container"] = snapshot_container(args.host, args.port, args.user, args.container)
 
     # 存档（快照的价值在于可回溯、可 diff）
-    default_name = f"env-snapshot-{machine['host']}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    default_name = f"env-snapshot-{args.host}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out_path = Path(args.out) if args.out else Path.cwd() / default_name
     try:
-        out_path.write_text(
-            json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        out_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as exc:
         return emit(
             {"ok": False, "action": "env-snapshot", "status": "failed",
