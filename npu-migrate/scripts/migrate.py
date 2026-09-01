@@ -264,6 +264,19 @@ def transfer_image(
 # 模型权重检查与同步
 # ---------------------------------------------------------------------------
 
+def _human_bytes(value: int | None) -> str:
+    """字节数转人类可读（报告用）。"""
+    if value is None:
+        return "未知"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(value)
+    index = 0
+    while size >= 1024 and index < len(units) - 1:
+        size /= 1024
+        index += 1
+    return f"{size:.1f}{units[index]}"
+
+
 def path_bytes(machine: dict[str, Any], path: str) -> int | None:
     """远端路径的总字节数（du -sb）。路径不存在返回 None。"""
     code, out, _err = run_ssh_machine(
@@ -301,38 +314,19 @@ def check_weights(
     for path in paths:
         source_bytes = path_bytes(source, path)
         target_bytes = path_bytes(target, path)
-        report.append(
-            {
-                "path": path,
-                "source_bytes": source_bytes,
-                "target_bytes": target_bytes,
-                "status": weight_status(source_bytes, target_bytes),
-            }
-        )
+        status = weight_status(source_bytes, target_bytes)
+        entry: dict[str, Any] = {
+            "path": path,
+            "source_bytes": source_bytes,
+            "target_bytes": target_bytes,
+            "status": status,
+        }
+        if status != "ok":
+            # 给用户的决策信息：缺多少（人类可读）
+            missing = (source_bytes or 0) - (target_bytes or 0)
+            entry["missing_bytes"] = missing if missing > 0 else None
+        report.append(entry)
     return report
-
-
-def sync_weights(source: dict[str, Any], target: dict[str, Any], path: str) -> None:
-    """把权重目录从源机 rsync 到目标机相同路径。权重巨大，优先 rsync 断点续传。"""
-    progress("sync-weights", f"同步权重 {path} -> {target['host']}:{path}（大目录，耗时较长）")
-    command = (
-        f"rsync -a --partial --info=progress2 {shlex.quote(path + '/')} "
-        f"{target['user']}@{target['host']}:{shlex.quote(path + '/')}"
-    )
-    code, out, err = run_ssh_machine(source, command, timeout=TRANSFER_TIMEOUT_SECONDS)
-    if code != 0:
-        # rsync 不可用降级 tar（无断点续传，失败需整体重来，报告中提示）
-        progress("sync-weights", "rsync 不可用，降级 tar 管道（无断点续传）")
-        normalized = path.rstrip("/")
-        parent, _, name = normalized.rpartition("/")
-        command = (
-            f"tar -C {shlex.quote(parent)} -cf - {shlex.quote(name)} | "
-            f"ssh -o BatchMode=yes {target['user']}@{target['host']} "
-            f"'mkdir -p {shlex.quote(normalized)} && tar -C {shlex.quote(parent)} -xf -'"
-        )
-        code, out, err = run_ssh_machine(source, command, timeout=TRANSFER_TIMEOUT_SECONDS)
-        if code != 0:
-            raise RuntimeError(f"权重同步失败：{(err or out).strip()[:300]}")
 
 
 def sync_code(source: dict[str, Any], target: dict[str, Any], code_path: str) -> None:
@@ -458,11 +452,6 @@ def main() -> int:
         action="append",
         help="服务依赖的模型权重路径（源机绝对路径，可传多次）；迁移前检查目标机是否存在",
     )
-    parser.add_argument(
-        "--sync-weights",
-        action="store_true",
-        help="目标机权重缺失/不完整时自动从源机同步（大目录耗时较长）",
-    )
     parser.add_argument("--npus", type=int, help="覆盖自动提取的卡数")
     parser.add_argument("--stop-source", action="store_true", help="迁移成功后停止源容器（默认保留）")
     parser.add_argument("--plan", action="store_true", help="干跑：输出迁移计划与将执行的命令，不实际迁移")
@@ -567,32 +556,35 @@ def main() -> int:
             transfer_image(source, target, image)
         sync_code(source, target, args.code_path)
 
-        # 4.5 模型权重检查（起容器前止损：服务起不来最常见的坑就是目标机没权重）
+        # 4.5 模型权重检查（起容器前止损：服务起不来最常见的坑就是目标机没权重）。
+        # 权重动辄几百 GB，缺失/不完整时不自动同步——报告明细，由用户决定怎么处理。
         weights_report: list[dict[str, Any]] | None = None
         if args.weights_path:
             progress("weights", "检查目标机模型权重")
             weights_report = check_weights(source, target, args.weights_path)
             incomplete = [w for w in weights_report if w["status"] != "ok"]
             if incomplete:
-                if not args.sync_weights:
-                    return emit(
-                        {"ok": False, "action": "migrate", "status": "needs_input",
-                         "error": "目标机缺少或权重不完整：" + "; ".join(
-                             f"{w['path']}({w['status']})" for w in incomplete),
-                         "weights": weights_report,
-                         "hint": "加 --sync-weights 自动从源机同步，或自行在目标机准备后重跑（幂等）"}
-                    )
-                for w in incomplete:
-                    sync_weights(source, target, w["path"])
-                weights_report = check_weights(source, target, args.weights_path)
-                still = [w for w in weights_report if w["status"] != "ok"]
-                if still:
-                    return emit(
-                        {"ok": False, "action": "migrate", "status": "failed",
-                         "error": "权重同步后仍不完整：" + "; ".join(
-                             f"{w['path']}({w['status']})" for w in still),
-                         "weights": weights_report}
-                    )
+                return emit(
+                    {
+                        "ok": False,
+                        "action": "migrate",
+                        "status": "needs_input",
+                        "error": "目标机模型权重缺失或不完整，已停止在起容器之前（镜像与代码已就位）：\n"
+                        + "\n".join(
+                            f"  {w['path']}: {w['status']}"
+                            f"（源 {_human_bytes(w['source_bytes'])} / 目标 {_human_bytes(w['target_bytes'])}"
+                            + (f" / 缺 {_human_bytes(w['missing_bytes'])}" if w.get("missing_bytes") else "")
+                            + "）"
+                            for w in incomplete
+                        ),
+                        "weights": weights_report,
+                        "options": [
+                            "用户自行在目标机准备权重（NFS/手动拷贝等）后重跑迁移（幂等）",
+                            "明确要求同步时由用户发起（权重巨大，脚本不自动搬）",
+                            "换一台已有权重的目标机重跑",
+                        ],
+                    }
+                )
 
         run_target_container(target, run_command, args.container)
         if args.script:
