@@ -29,8 +29,9 @@ from typing import Any
 
 def _inject_dependency() -> str:
     candidates = [
-        Path.home() / ".claude" / "skills" / "server-management" / "scripts",
-        Path(__file__).resolve().parents[2] / "server-management" / "scripts",
+        Path.home() / ".claude" / "skills" / "server-management" / "scripts",  # Claude Code
+        Path.home() / ".agents" / "skills" / "server-management" / "scripts",  # Codex
+        Path(__file__).resolve().parents[2] / "server-management" / "scripts",  # 仓库开发布局
     ]
     for candidate in candidates:
         if (candidate / "common.py").is_file():
