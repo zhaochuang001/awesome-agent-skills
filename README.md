@@ -7,6 +7,7 @@
 - [`vllm-ascend-accuracy`](vllm-ascend-accuracy/)：进入本地或远程容器，复现、诊断、迭代修复并验证 vLLM Ascend 的乱码、复读及推理精度问题。
 - [`server-management`](server-management/)：管理服务器清单——密码一次性引导公钥后永久密钥认证地添加/移除/验证服务器，并提供 NPU 集群状态常驻监控与查询。
 - [`npu-migrate`](npu-migrate/)：把源服务器的容器和代码文件夹迁移到有空闲 NPU 卡的服务器并自动拉起服务，依赖 server-management 的机器清单与空闲状态。
+- [`disk-cleanup`](disk-cleanup/)：服务器磁盘空间分析与清理——docker 镜像/容器分级清理（安全级/确认级），共享节点安全边界内执行，依赖 server-management。
 
 每个一级目录都是一个可独立安装的 skill，入口文件为该目录中的 `SKILL.md`。
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "磁盘清理"
+  short_description: "分析并清理服务器磁盘空间（docker 镜像/容器为主）"
+  default_prompt: "使用 $disk-cleanup 分析并清理这台服务器的磁盘空间。"
