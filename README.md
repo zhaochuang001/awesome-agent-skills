@@ -53,40 +53,11 @@
 
 Codex 也可以用内置安装器：输入 `$skill-installer` 并提供上面的目录地址。
 
-安装完成后**新开会话**即可使用（skill 列表在会话启动时加载）；之后直接描述任务触发，或用 `/skill-name` 显式调用。不经过 Agent 的环境参考下方「手动安装」。
-
-## 手动安装
-
-Codex 与 Claude Code 的手动安装步骤相同，仅 skills 目录不同。安装时必须复制整个目录，不能只复制 `SKILL.md`，否则 `references/`、`scripts/` 和其他资源将不可用；安装本仓库其他 skill 时，将命令中的 `vllm-ascend-accuracy` 替换为对应目录名。
-
-macOS/Linux（以 Codex 为例，Claude Code 将 `SKILLS_ROOT` 改为 `~/.claude/skills`）：
-
-```bash
-git clone https://github.com/zhaochuang001/awesome-agent-skills.git
-SKILLS_ROOT=~/.agents/skills        # Codex；Claude Code 改为 ~/.claude/skills
-mkdir -p "$SKILLS_ROOT"
-cp -R awesome-agent-skills/vllm-ascend-accuracy "$SKILLS_ROOT/"
-```
-
-Windows PowerShell（以 Codex 为例，Claude Code 将 `$SkillsRoot` 改为 `"$env:USERPROFILE\.claude\skills"`）：
-
-```powershell
-git clone https://github.com/zhaochuang001/awesome-agent-skills.git
-$SkillsRoot = "$env:USERPROFILE\.agents\skills"   # Codex；Claude Code 改为 .claude\skills
-New-Item -ItemType Directory -Force $SkillsRoot | Out-Null
-Copy-Item -Recurse ".\awesome-agent-skills\vllm-ascend-accuracy" $SkillsRoot
-```
+安装完成后**新开会话**即可使用（skill 列表在会话启动时加载）；之后直接描述任务触发，或用 `/skill-name` 显式调用。
 
 ## 更新
 
-拉取本仓库最新版本后，重新复制对应 skill 目录即可：
-
-```bash
-cd awesome-agent-skills
-git pull
-```
-
-开发者也可以将 skill 目录软链接到个人 skills 目录，这样仓库更新后会立即生效。Codex 与 Claude Code 都支持链接形式的 skill 目录。
+更新时对 Agent 说"重新拉取该仓库并更新已安装的 skill"即可；也可以删除后重新安装。
 
 ## 安全提示
 
