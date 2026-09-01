@@ -30,8 +30,18 @@
 
 - 镜像：源机 `docker save | gzip -1 | ssh 目标 'gzip -d | docker load'`（gzip -1 换速度，镜像常为多 GB）；超时上限 1 小时
 - 代码：rsync 增量同步（服务器上有 rsync 时）；无 rsync 降级 tar 管道
+- 权重（--sync-weights 触发时）：rsync `-a --partial` 断点续传；无 rsync 降级 tar（无断点，失败整体重来，报告中提示）
 - 代码同步到**相同绝对路径**，使容器挂载参数无需修改
 - 任何传输都不经过本地 Windows（用户已确认服务器间可直连）
+
+## 模型权重检查
+
+- `--weights-path` 可传多次；每个路径独立检查
+- 判定：目标不存在 = `missing`；目标比源小超 1% = `partial`；否则 `ok`（du -sb 粒度的近似判断，目标更大视为可用）
+- 缺失/不完整且无 `--sync-weights`：返回 `needs_input`（迁移停在起容器之前，镜像与代码已就位，幂等重跑）
+- `--sync-weights`：逐个同步后复查，仍不完整则 `failed`
+- `--plan` 干跑同样执行只读检查并输出状态
+- 权重检查发生在代码同步之后、起容器之前：不让服务跑到一半才发现加载不了权重
 
 ## 复刻规则（docker run 参数）
 

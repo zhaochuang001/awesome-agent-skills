@@ -260,6 +260,81 @@ def transfer_image(
         raise RuntimeError(f"镜像传输失败：{(err or out).strip()[:300]}")
 
 
+# ---------------------------------------------------------------------------
+# 模型权重检查与同步
+# ---------------------------------------------------------------------------
+
+def path_bytes(machine: dict[str, Any], path: str) -> int | None:
+    """远端路径的总字节数（du -sb）。路径不存在返回 None。"""
+    code, out, _err = run_ssh_machine(
+        machine,
+        f"test -e {shlex.quote(path)} && du -sb {shlex.quote(path)}",
+        timeout=180,
+    )
+    if code != 0:
+        return None
+    try:
+        return int(out.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def weight_status(source_bytes: int | None, target_bytes: int | None) -> str:
+    """判定目标机权重状态。纯函数（单测覆盖）。
+
+    - missing：目标不存在
+    - partial：目标比源小超过 1%（可能传输中断或版本不一致）
+    - ok：大小一致（du 粒度下的近似判断）
+    """
+    if target_bytes is None:
+        return "missing"
+    if source_bytes and target_bytes < source_bytes * 0.99:
+        return "partial"
+    return "ok"
+
+
+def check_weights(
+    source: dict[str, Any], target: dict[str, Any], paths: list[str]
+) -> list[dict[str, Any]]:
+    """检查目标机上的模型权重。返回每个路径的状态报告。"""
+    report: list[dict[str, Any]] = []
+    for path in paths:
+        source_bytes = path_bytes(source, path)
+        target_bytes = path_bytes(target, path)
+        report.append(
+            {
+                "path": path,
+                "source_bytes": source_bytes,
+                "target_bytes": target_bytes,
+                "status": weight_status(source_bytes, target_bytes),
+            }
+        )
+    return report
+
+
+def sync_weights(source: dict[str, Any], target: dict[str, Any], path: str) -> None:
+    """把权重目录从源机 rsync 到目标机相同路径。权重巨大，优先 rsync 断点续传。"""
+    progress("sync-weights", f"同步权重 {path} -> {target['host']}:{path}（大目录，耗时较长）")
+    command = (
+        f"rsync -a --partial --info=progress2 {shlex.quote(path + '/')} "
+        f"{target['user']}@{target['host']}:{shlex.quote(path + '/')}"
+    )
+    code, out, err = run_ssh_machine(source, command, timeout=TRANSFER_TIMEOUT_SECONDS)
+    if code != 0:
+        # rsync 不可用降级 tar（无断点续传，失败需整体重来，报告中提示）
+        progress("sync-weights", "rsync 不可用，降级 tar 管道（无断点续传）")
+        normalized = path.rstrip("/")
+        parent, _, name = normalized.rpartition("/")
+        command = (
+            f"tar -C {shlex.quote(parent)} -cf - {shlex.quote(name)} | "
+            f"ssh -o BatchMode=yes {target['user']}@{target['host']} "
+            f"'mkdir -p {shlex.quote(normalized)} && tar -C {shlex.quote(parent)} -xf -'"
+        )
+        code, out, err = run_ssh_machine(source, command, timeout=TRANSFER_TIMEOUT_SECONDS)
+        if code != 0:
+            raise RuntimeError(f"权重同步失败：{(err or out).strip()[:300]}")
+
+
 def sync_code(source: dict[str, Any], target: dict[str, Any], code_path: str) -> None:
     """rsync 代码到目标机相同绝对路径（路径不变，容器挂载参数无需修改）。"""
     progress("sync-code", f"同步代码 {code_path} -> {target['host']}:{code_path}")
@@ -378,6 +453,16 @@ def main() -> int:
     parser.add_argument("--script", help="服务启动脚本（容器内路径）；开发容器可不给，跳过启动")
     parser.add_argument("--target", help="目标服务器（不指定则自动选择空闲最多的机器）")
     parser.add_argument("--image", help="复用已 commit 的迁移镜像（多目标迁移时避免重复 commit）")
+    parser.add_argument(
+        "--weights-path",
+        action="append",
+        help="服务依赖的模型权重路径（源机绝对路径，可传多次）；迁移前检查目标机是否存在",
+    )
+    parser.add_argument(
+        "--sync-weights",
+        action="store_true",
+        help="目标机权重缺失/不完整时自动从源机同步（大目录耗时较长）",
+    )
     parser.add_argument("--npus", type=int, help="覆盖自动提取的卡数")
     parser.add_argument("--stop-source", action="store_true", help="迁移成功后停止源容器（默认保留）")
     parser.add_argument("--plan", action="store_true", help="干跑：输出迁移计划与将执行的命令，不实际迁移")
@@ -462,6 +547,9 @@ def main() -> int:
     }
 
     if args.plan:
+        if args.weights_path:
+            progress("weights", "检查目标机模型权重（只读）")
+            plan["weights"] = check_weights(source, target, args.weights_path)
         return emit(
             {"ok": True, "action": "migrate", "status": "migrated", "plan": plan,
              "note": "--plan 干跑模式：未执行任何变更"}
@@ -478,6 +566,34 @@ def main() -> int:
         else:
             transfer_image(source, target, image)
         sync_code(source, target, args.code_path)
+
+        # 4.5 模型权重检查（起容器前止损：服务起不来最常见的坑就是目标机没权重）
+        weights_report: list[dict[str, Any]] | None = None
+        if args.weights_path:
+            progress("weights", "检查目标机模型权重")
+            weights_report = check_weights(source, target, args.weights_path)
+            incomplete = [w for w in weights_report if w["status"] != "ok"]
+            if incomplete:
+                if not args.sync_weights:
+                    return emit(
+                        {"ok": False, "action": "migrate", "status": "needs_input",
+                         "error": "目标机缺少或权重不完整：" + "; ".join(
+                             f"{w['path']}({w['status']})" for w in incomplete),
+                         "weights": weights_report,
+                         "hint": "加 --sync-weights 自动从源机同步，或自行在目标机准备后重跑（幂等）"}
+                    )
+                for w in incomplete:
+                    sync_weights(source, target, w["path"])
+                weights_report = check_weights(source, target, args.weights_path)
+                still = [w for w in weights_report if w["status"] != "ok"]
+                if still:
+                    return emit(
+                        {"ok": False, "action": "migrate", "status": "failed",
+                         "error": "权重同步后仍不完整：" + "; ".join(
+                             f"{w['path']}({w['status']})" for w in still),
+                         "weights": weights_report}
+                    )
+
         run_target_container(target, run_command, args.container)
         if args.script:
             start_service(target, args.container, args.script)
@@ -513,6 +629,7 @@ def main() -> int:
             "status": "migrated" if verification["container_status"] == "running" else "failed",
             "plan": plan,
             "verification": verification,
+            "weights": weights_report,
             "source_container_stopped": stopped_source,
             "external_mounts_warning": {
                 "note": "以下挂载路径未自动同步（仅同步了 --code-path），服务读取失败时需手动处理",

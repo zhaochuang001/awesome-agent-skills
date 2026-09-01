@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from migrate import build_run_command, extract_npu_devices, parse_visible_devices, select_target
+from migrate import build_run_command, extract_npu_devices, parse_visible_devices, select_target, weight_status
 
 # 真实 8 卡 910 容器的典型 docker inspect 设备列表
 DEVICES_8CARD = [
@@ -123,3 +123,14 @@ def test_select_target_prefer_insufficient():
     host, _, _, note = select_target("s", 2, idle, "b")
     assert host is None
     assert "不足" in note
+
+
+def test_weight_status():
+    assert weight_status(100, None) == "missing"        # 目标不存在
+    assert weight_status(100, 50) == "partial"          # 目标明显偏小
+    assert weight_status(100, 98.9) == "partial"        # 差超 1%（98.9 < 99）
+    assert weight_status(100, 99.5) == "ok"             # 差 0.5% 在容差内
+    assert weight_status(100, 100) == "ok"
+    assert weight_status(100, 120) == "ok"              # 目标更大（可能含额外文件）视为可用
+    assert weight_status(None, 100) == "ok"             # 源上也读不到大小时只看目标存在性
+    assert weight_status(None, None) == "missing"
