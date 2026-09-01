@@ -83,6 +83,8 @@ def inspect_source_container(machine: dict[str, Any], container: str) -> dict[st
         "privileged": bool(host_config.get("Privileged")),
         "network_mode": host_config.get("NetworkMode") or "",
         "tty": bool((info.get("Config") or {}).get("Tty")),
+        "shm_size": int(host_config.get("ShmSize") or 0),
+        "ipc_mode": host_config.get("IpcMode") or "",
         "status": (info.get("State") or {}).get("Status"),
     }
 
@@ -368,6 +370,11 @@ def build_run_command(
         parts.append("-t")
     if info["network_mode"] and info["network_mode"] not in ("default", ""):
         parts.append(f"--network {info['network_mode']}")
+    # /dev/shm 大小与 IPC 模式：vLLM 等多进程服务需要大共享内存，漏掉会启动失败
+    if info.get("shm_size", 0) > 64 * 1024 * 1024:  # 非 docker 默认值才显式复刻
+        parts.append(f"--shm-size {info['shm_size']}")
+    if info.get("ipc_mode") and info["ipc_mode"] not in ("private", ""):
+        parts.append(f"--ipc {info['ipc_mode']}")
     # 共享设备原样保留（davinci_manager / hisi_hdc / devmm_svm）
     for dev in info["shared_devices"]:
         parts.append(f"--device {shlex.quote(dev)}")
@@ -390,6 +397,13 @@ def build_run_command(
             parts.append(f"-p {binding.get('HostPort', '')}:{port_number}")
     parts.append(shlex.quote(image))
     return " ".join(parts)
+
+
+def container_exists_on(machine: dict[str, Any], name: str) -> bool:
+    code, _out, _err = run_ssh_machine(
+        machine, f"docker inspect -f '{{{{.State.Status}}}}' {shlex.quote(name)}", timeout=30
+    )
+    return code == 0
 
 
 def run_target_container(
@@ -451,6 +465,11 @@ def main() -> int:
         "--weights-path",
         action="append",
         help="服务依赖的模型权重路径（源机绝对路径，可传多次）；迁移前检查目标机是否存在",
+    )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="目标机已有同名容器时先删除再重建（用于更新已迁移过的容器）",
     )
     parser.add_argument("--npus", type=int, help="覆盖自动提取的卡数")
     parser.add_argument("--stop-source", action="store_true", help="迁移成功后停止源容器（默认保留）")
@@ -546,6 +565,18 @@ def main() -> int:
 
     # 4. 执行迁移
     try:
+        # 目标机已有同名容器：默认不碰（可能是用户在用的服务），--replace 才替换
+        if container_exists_on(target, args.container):
+            if args.replace:
+                progress("replace", f"目标机已有容器 {args.container}，--replace 指定，删除重建")
+                run_ssh_machine(target, f"docker rm -f {shlex.quote(args.container)}", timeout=60)
+            else:
+                return emit(
+                    {"ok": False, "action": "migrate", "status": "needs_input",
+                     "error": f"目标机 {target_host} 已存在同名容器 {args.container}（"
+                              "可能是之前迁移的产物或正在运行的服务），未做任何改动",
+                     "hint": "确认可替换后加 --replace 重跑；或换目标机"}
+                )
         if args.image:
             progress("commit", f"复用已有镜像 {image}（跳过 commit）")
         else:

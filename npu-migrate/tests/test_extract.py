@@ -38,6 +38,8 @@ INFO_SAMPLE = {
     "privileged": False,
     "network_mode": "host",
     "shared_devices": ["/dev/davinci_manager", "/dev/devmm_svm", "/dev/hisi_hdc"],
+    "shm_size": 1073741824000,
+    "ipc_mode": "shareable",
     "status": "running",
 }
 
@@ -94,6 +96,17 @@ def test_build_run_command():
     # 挂载与端口原样复刻
     assert "-v /home/user/code:/workspace" in cmd
     assert "-p 8000:8000" in cmd
+    # /dev/shm 与 IPC 模式复刻（vLLM 等多进程服务必需）
+    assert "--shm-size 1073741824000" in cmd
+    assert "--ipc shareable" in cmd
+
+
+def test_build_run_command_default_shm_omitted():
+    """shm 为 docker 默认 64MB 时不显式输出 --shm-size 参数。"""
+    info = dict(INFO_SAMPLE, shm_size=64 * 1024 * 1024, ipc_mode="private")
+    cmd = build_run_command("migrate/demo:20260831", info, [0, 1], "demo")
+    assert "--shm-size" not in cmd
+    assert "--ipc" not in cmd
 
 
 def test_select_target_auto():
