@@ -1,0 +1,4 @@
+interface:
+  display_name: "NPU 服务迁移"
+  short_description: "把容器和代码迁移到有空闲 NPU 卡的服务器并拉起服务"
+  default_prompt: "使用 $npu-migrate 把我的容器和代码迁移到有空闲卡的服务器上并启动服务。"

@@ -5,6 +5,8 @@
 ## Skills
 
 - [`vllm-ascend-accuracy`](vllm-ascend-accuracy/)：进入本地或远程容器，复现、诊断、迭代修复并验证 vLLM Ascend 的乱码、复读及推理精度问题。
+- [`server-management`](server-management/)：管理服务器清单——密码一次性引导公钥后永久密钥认证地添加/移除/验证服务器，并提供 NPU 集群状态常驻监控与查询。
+- [`npu-migrate`](npu-migrate/)：把源服务器的容器和代码文件夹迁移到有空闲 NPU 卡的服务器并自动拉起服务，依赖 server-management 的机器清单与空闲状态。
 
 每个一级目录都是一个可独立安装的 skill，入口文件为该目录中的 `SKILL.md`。
 
@@ -31,49 +33,11 @@ $vllm-ascend-accuracy 帮我修复一个 vLLM Ascend 精度问题
 
 ### 手动安装
 
-将整个 skill 目录复制到以下任一位置：
-
-- 用户级：`~/.agents/skills/<skill-name>/`
-- 项目级：`<project>/.agents/skills/<skill-name>/`
-
-例如在 macOS/Linux 上安装到用户目录：
-
-```bash
-git clone https://github.com/zhaochuang001/awesome-agent-skills.git
-mkdir -p ~/.agents/skills
-cp -R awesome-agent-skills/vllm-ascend-accuracy ~/.agents/skills/
-```
-
-在 Windows PowerShell 中：
-
-```powershell
-git clone https://github.com/zhaochuang001/awesome-agent-skills.git
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.agents\skills" | Out-Null
-Copy-Item -Recurse ".\awesome-agent-skills\vllm-ascend-accuracy" "$env:USERPROFILE\.agents\skills\"
-```
+不使用安装器时，将整个 skill 目录复制到 Codex 的 skills 目录：用户级 `~/.agents/skills/<skill-name>/`，项目级 `<project>/.agents/skills/<skill-name>/`。命令见下方[「手动安装」](#手动安装)。
 
 ## Claude Code 安装与使用
 
-Claude Code 可以从用户目录或项目目录加载 skills：
-
-- 用户级：`~/.claude/skills/<skill-name>/`
-- 项目级：`<project>/.claude/skills/<skill-name>/`
-
-### macOS/Linux
-
-```bash
-git clone https://github.com/zhaochuang001/awesome-agent-skills.git
-mkdir -p ~/.claude/skills
-cp -R awesome-agent-skills/vllm-ascend-accuracy ~/.claude/skills/
-```
-
-### Windows PowerShell
-
-```powershell
-git clone https://github.com/zhaochuang001/awesome-agent-skills.git
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills" | Out-Null
-Copy-Item -Recurse ".\awesome-agent-skills\vllm-ascend-accuracy" "$env:USERPROFILE\.claude\skills\"
-```
+将整个 skill 目录复制到 Claude Code 的 skills 目录：用户级 `~/.claude/skills/<skill-name>/`，项目级 `<project>/.claude/skills/<skill-name>/`。命令见下方[「手动安装」](#手动安装)。
 
 在 Claude Code 中显式调用：
 
@@ -83,9 +47,27 @@ Copy-Item -Recurse ".\awesome-agent-skills\vllm-ascend-accuracy" "$env:USERPROFI
 
 Claude Code 也可以根据 skill 的 `description` 自动调用。使用 `/skills` 检查是否加载成功；如果 skills 顶层目录是在当前会话启动后首次创建的，请重启 Claude Code。
 
-## 安装其他 Skills
+## 手动安装
 
-将示例中的 `vllm-ascend-accuracy` 替换为本仓库其他包含 `SKILL.md` 的目录名即可。安装时必须复制整个目录，不能只复制 `SKILL.md`，否则 `references/`、`scripts/` 和其他资源将不可用。
+Codex 与 Claude Code 的手动安装步骤相同，仅 skills 目录不同。安装时必须复制整个目录，不能只复制 `SKILL.md`，否则 `references/`、`scripts/` 和其他资源将不可用；安装本仓库其他 skill 时，将命令中的 `vllm-ascend-accuracy` 替换为对应目录名。
+
+macOS/Linux（以 Codex 为例，Claude Code 将 `SKILLS_ROOT` 改为 `~/.claude/skills`）：
+
+```bash
+git clone https://github.com/zhaochuang001/awesome-agent-skills.git
+SKILLS_ROOT=~/.agents/skills        # Codex；Claude Code 改为 ~/.claude/skills
+mkdir -p "$SKILLS_ROOT"
+cp -R awesome-agent-skills/vllm-ascend-accuracy "$SKILLS_ROOT/"
+```
+
+Windows PowerShell（以 Codex 为例，Claude Code 将 `$SkillsRoot` 改为 `"$env:USERPROFILE\.claude\skills"`）：
+
+```powershell
+git clone https://github.com/zhaochuang001/awesome-agent-skills.git
+$SkillsRoot = "$env:USERPROFILE\.agents\skills"   # Codex；Claude Code 改为 .claude\skills
+New-Item -ItemType Directory -Force $SkillsRoot | Out-Null
+Copy-Item -Recurse ".\awesome-agent-skills\vllm-ascend-accuracy" $SkillsRoot
+```
 
 ## 更新
 
