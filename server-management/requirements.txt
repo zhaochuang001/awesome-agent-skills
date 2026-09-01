@@ -1,0 +1,6 @@
+# server-management 可选依赖
+# 安装（华为内网走华为云镜像）：
+#   python -m pip install --user -i https://repo.huaweicloud.com/repository/pypi/simple/ -r requirements.txt
+paramiko>=3.4      # 仅 machine_add 的密码 bootstrap 需要
+fastapi>=0.110     # 仅 fleet 常驻服务需要
+uvicorn>=0.29      # 仅 fleet 常驻服务需要

@@ -1,0 +1,9 @@
+# 前端工程
+server-management/webapp/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code 工作目录（计划文件等，不入库）
+.claude/

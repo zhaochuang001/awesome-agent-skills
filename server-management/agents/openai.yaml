@@ -1,0 +1,4 @@
+interface:
+  display_name: "服务器管理"
+  short_description: "添加/移除/验证服务器并查询 NPU 集群状态"
+  default_prompt: "使用 $server-management 管理我的服务器：添加、移除、验证或查询 NPU 集群状态。"
