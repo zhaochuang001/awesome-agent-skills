@@ -44,12 +44,13 @@ function NpuDie({ device, chip, detail = false }: { device: Device; chip?: Devic
   const telemetry = chip ?? device;
   const hbm = percent(telemetry.mem_used_mb, telemetry.mem_total_mb);
   const active = clampPercent(telemetry.aicore_util) > 0;
+  const healthy = (chip?.health ?? device.health) === 'OK' || (chip?.health ?? device.health) == null;
   const identity = chip ? `NPU ${device.id} / ${chip.bus_id}` : `NPU ${device.id}`;
   return (
     <span
-      className={`npu-die ${detail ? 'npu-die--detail' : ''} ${hbm != null && hbm >= 32 ? 'is-dark' : ''}`}
+      className={`npu-die ${detail ? 'npu-die--detail' : ''} ${hbm != null && hbm >= 32 ? 'is-dark' : ''} ${healthy ? '' : 'is-warning'}`}
       style={{ backgroundColor: dieColor(hbm) }}
-      title={`${identity} · HBM ${number(hbm, '%')} · AICore ${number(telemetry.aicore_util, '%')}`}
+      title={`${identity} · HBM ${number(hbm, '%')} · AICore ${number(telemetry.aicore_util, '%')}${healthy ? '' : ` · 健康 ${chip?.health ?? device.health}`}`}
     >
       <b>{device.id}</b>
       {detail && <small>HBM {number(hbm, '%')}</small>}
@@ -264,6 +265,7 @@ function ServerCard({
   const hbmTotal = devices.reduce((sum, d) => sum + (d.mem_total_mb ?? 0), 0);
   const hbm = percent(hbmUsed, hbmTotal);
   const activeDies = dies.filter(({ device, chip }) => clampPercent((chip ?? device).aicore_util) > 0).length;
+  const alarmCards = devices.filter((d) => d.health != null && d.health !== 'OK').length;;
   return (
     <article className={`server-card server-card--${machine.reachable ? 'online' : 'offline'}`}>
       <button className="server-card__open" onClick={onOpen} aria-label={`查看 ${machine.alias} 详情`}>
@@ -277,6 +279,11 @@ function ServerCard({
           </div>
           <span className="chevron">›</span>
         </header>
+        {alarmCards > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <span className="badge yellow">{alarmCards} 张卡健康异常</span>
+          </div>
+        )}
         <div
           className="device-strip"
           style={dies.length ? { gridTemplateColumns: `repeat(${dies.length}, minmax(0, 1fr))` } : undefined}
@@ -492,8 +499,12 @@ function ServerDetail({
           <div className="device-grid">
             {devices.map((device) => {
               const deviceHbm = percent(device.mem_used_mb, device.mem_total_mb);
+              const unhealthy = device.health != null && device.health !== 'OK';
               return (
-                <article className={`device-card ${clampPercent(device.aicore_util) > 0 ? 'is-busy' : ''}`} key={device.id}>
+                <article
+                  className={`device-card ${clampPercent(device.aicore_util) > 0 ? 'is-busy' : ''} ${unhealthy ? 'is-warning' : ''}`}
+                  key={device.id}
+                >
                   <header>
                     <span className="device-die-pair">
                       {device.chips.length
