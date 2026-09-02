@@ -10,6 +10,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from npu_probe import infer_machine_type, parse_npu_smi_output, summarize_fleet
 
+# 真实 npu-smi 25.6.rc1.b218 的输出格式（Ascend950DT：NPU ID 独立列、Bus-Id 位置为 NA）
+SAMPLE_OUTPUT_950 = """
++--------+------------------+---------------+----------------------------------------------------------------------+
+| npu-smi 25.6.rc1.b218                            Version: 25.6.rc1.b218                |
++--------+------------------+---------------+----------------------------------------------------------------------+
+| NPU ID | Name             | Health        | Power(W)              Temp(C)                  Hugepages-Usage(page) |
+|        |                  | Bus-Id        | NPU Util(%)           Memory-Usage(MB)         HBM-Usage(MB)         |
++========+==================+===============+======================================================================+
+| 0      | Ascend950DT      | OK            | 398.6                 46                       0     / 0             |
+|        |                  | NA            | 0                     0     / 0                4765  / 98304         |
++===========================+===============+======================================================================+
+| 1      | Ascend950DT      | OK            | 401.0                 51                       0     / 0             |
+|        |                  | NA            | 0                     0     / 0                4764  / 98304         |
++===========================+===============+======================================================================+
+| 7      | Ascend950DT      | Warning       | 397.5                 61                       0     / 0             |
+|        |                  | NA            | 42                    0     / 0                91000 / 98304         |
++===========================+===============+======================================================================+
+"""
+
 # 真实 npu-smi 24.x 的典型输出格式（910B3 双行卡格式）
 SAMPLE_OUTPUT = """
 +-------------------------------------------------------------------------------------------+
@@ -133,11 +152,32 @@ def test_parse_26_idle_card():
     assert card5["power_w"] == 159.6
 
 
+def test_parse_950_format():
+    """950 系格式（NPU ID 独立列、Bus-Id 为 NA）：配对解析与聚合。"""
+    result = parse_npu_smi_output(SAMPLE_OUTPUT_950)
+    assert result["npu_count"] == 3
+    card0 = result["npus"][0]
+    assert card0["id"] == 0
+    assert card0["name"] == "Ascend950DT"
+    assert card0["health"] == "OK"
+    assert card0["power_w"] == 398.6
+    assert card0["temp_c"] == 46.0
+    assert card0["bus_id"] is None  # 950 格式 bus 位置是 NA
+    assert card0["aicore_util"] == 0
+    assert card0["mem_used_mb"] == 4765
+    assert card0["mem_total_mb"] == 98304
+    card7 = [n for n in result["npus"] if n["id"] == 7][0]
+    assert card7["health"] == "Warning"
+    assert card7["aicore_util"] == 42
+    assert card7["mem_used_mb"] == 91000
+
+
 def test_infer_machine_type():
     assert infer_machine_type("910B3") == "910B"
     assert infer_machine_type("310P4") == "310P"
     assert infer_machine_type("Ascend910C1") == "910C"
     assert infer_machine_type("Ascend910") == "910"
+    assert infer_machine_type("Ascend950DT") == "950"
     assert infer_machine_type("Unknown") == "unknown"
 
 

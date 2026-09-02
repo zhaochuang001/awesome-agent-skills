@@ -46,6 +46,17 @@ _DEVICE_RE = re.compile(
     r"\s*(?P<bus>[\da-fA-F]{4}:[\da-fA-F]{2}:[\da-fA-F]{2}\.[\da-fA-F])\s*\|"
     r"\s*(?P<aicore>-|\d+)\s+(?P<rest>[\d\s/]+)\|"
 )
+# ---- 950 系格式（npu-smi 25.6 实测，Ascend950DT）：NPU ID 与 Name 分列、Bus-Id 位置常为 NA ----
+# 概要行：| 0      | Ascend950DT      | OK            | 398.6   46   0/0 |
+_SUMMARY_950_RE = re.compile(
+    r"^\|\s*(?P<id>\d+)\s*\|\s*(?P<name>[A-Za-z0-9][A-Za-z0-9_.\-]*)\s*\|\s*(?P<health>\S+)\s*\|"
+    r"\s*(?P<power>-|\d+\.?\d*)\s+(?P<temp>-|\d+\.?\d*)\s"
+)
+# device 行：|        |                  | NA            | 0    0/0    4765/98304 |（前两列空）
+_DEVICE_950_RE = re.compile(
+    r"^\|\s*\|\s*\|\s*(?:NA|[\da-fA-F]{4}:[\da-fA-F]{2}:[\da-fA-F]{2}\.[\da-fA-F])\s*\|"
+    r"\s*(?P<aicore>-|\d+)\s+(?P<rest>[\d\s/]+)\|"
+)
 # 进程行：| 0     0  | 1774110  | VLLMWorker_PP  | 56684  | NA |
 _PROCESS_RE = re.compile(
     r"^\|\s*(?P<npu>\d+)\s+(?P<chip>\d+)\s+\|\s*(?P<pid>\d+)\s+\|\s*(?P<name>\S+)\s+\|"
@@ -61,6 +72,7 @@ _NAME_TYPE_MAP = (
     ("910C", "910C"),
     ("910A", "910A"),
     ("910", "910"),
+    ("950", "950"),
 )
 
 
@@ -186,8 +198,39 @@ def parse_npu_smi_output(text: str) -> dict[str, Any]:
             pending_summary = None
             continue
 
+        # 950 系 device 行：前两列空、bus 列常为 NA（与 24/26 的区别：无 chip/phy 列）
+        matched = _DEVICE_950_RE.match(line)
+        if matched and pending_summary is not None:
+            pairs = _PAIR_RE.findall(matched.group("rest"))
+            hbm_used, hbm_total = (int(pairs[-1][0]), int(pairs[-1][1])) if pairs else (None, None)
+            chip = {
+                "name": pending_summary["name"],
+                "health": pending_summary["health"],
+                "power_w": pending_summary["power_w"],
+                "temp_c": pending_summary["temp_c"],
+                "bus_id": None,
+                "aicore_util": _to_int(matched.group("aicore")),
+                "mem_used_mb": hbm_used,
+                "mem_total_mb": hbm_total,
+            }
+            _merge_chip(card(pending_summary["id"]), chip)
+            pending_summary = None
+            continue
+
         # 概要行：暂存等待下一行配对
         matched = _SUMMARY_RE.match(line)
+        if matched:
+            pending_summary = {
+                "id": int(matched.group("id")),
+                "name": matched.group("name"),
+                "health": matched.group("health"),
+                "power_w": _to_float(matched.group("power")),
+                "temp_c": _to_float(matched.group("temp")),
+            }
+            continue
+
+        # 950 系概要行：NPU ID 与 Name 分列（与 24/26 的区别：ID 后是列分隔线）
+        matched = _SUMMARY_950_RE.match(line)
         if matched:
             pending_summary = {
                 "id": int(matched.group("id")),
