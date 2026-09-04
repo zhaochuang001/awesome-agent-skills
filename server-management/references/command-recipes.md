@@ -20,10 +20,10 @@ python scripts/machine_add.py --host 125.173.1.2 --password-env SM_PASSWORD
 unset SM_PASSWORD               # PowerShell: Remove-Item Env:SM_PASSWORD
 ```
 
-非默认端口/用户/别名：
+非默认端口/用户/别名/标签：
 
 ```bash
-python scripts/machine_add.py --host 10.0.0.5 --port 2222 --user ubuntu --alias npu-node-5
+python scripts/machine_add.py --host 10.0.0.5 --port 2222 --user ubuntu --alias npu-node-5 --tag a3 --tag 910
 ```
 
 机器已配置过密钥（无需密码）：
@@ -56,6 +56,7 @@ python scripts/machine_verify.py --machine 10.0.0.5
 ```bash
 python scripts/fleet_cli.py servers                 # 列出全部机器与 NPU 状态（读缓存）
 python scripts/fleet_cli.py servers --live          # 即时探测
+python scripts/fleet_cli.py servers --tag a3        # 按标签过滤（可重复：--tag a3 --tag a5）
 python scripts/fleet_cli.py status 10.0.0.5         # 单机详情
 python scripts/fleet_cli.py capacity --min-idle 4   # 至少 4 张空闲卡的机器
 python scripts/fleet_cli.py capacity --min-idle 8 --max-age 600  # 空闲至少 10 分钟（需服务持续运行）

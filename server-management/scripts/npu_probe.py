@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """npu-smi 输出解析与远程 NPU 状态采集。
 
-支持两种真实格式（fixture 单测见 tests/）：
+支持的真实格式（fixture 单测见 tests/）：
 - 24.x：每卡两行（概要 + device），device 行首列是 NPU 编号、Name 列为 "NA"；
+- 25.2（910B4 单 chip）：每卡两行（概要 + chip），chip 行只有 chip 一列（无 phy 列），
+  第三列含 Memory-Usage 与 HBM-Usage 两组数字对；
 - 26.x：每卡四个物理行（每 chip 一组概要+device），device 行首列是 chip/Phy-ID，
   功耗在 chip1 概要行为 "-"，第三列含 DDR Memory-Usage 与 HBM-Usage 两组数字对，
-  输出末尾附进程表。
+  输出末尾附进程表；
+- 950 系：概要行 NPU ID 与 Name 分列，device 行无 chip/phy 列、Bus-Id 常为 "NA"。
 
 解析策略（宽容优先，坏行跳过不中断）：
 - 概要行与紧随的 device 行配对成一个 chip 记录，按概要行的 NPU 编号聚合到卡；
 - bus-id 必须是严格 "0000:9D:00.0" 格式才认 device 行，避免把概要行/进程行误认；
-- 显存取每组数字对的最后一组（24.x 是唯一一组，26.x 是 HBM）；
+- 显存取每组数字对的最后一组（24.x 是唯一一组，25.2/26.x 是 HBM）；
 - 聚合语义：功耗取首个非空（chip0），温度/AICore 取各 chip 最大值（保守），
   健康状态任一 chip 异常即报异常。
 """
@@ -43,6 +46,13 @@ _SUMMARY_RE = re.compile(
 # device 行：col2 必须是严格 bus-id 格式（含冒号点号），这是与概要行/进程行的关键区分
 _DEVICE_RE = re.compile(
     r"^\|\s*(?P<chip>\d+)\s+(?P<phy>\d+|NA)\s*\|"
+    r"\s*(?P<bus>[\da-fA-F]{4}:[\da-fA-F]{2}:[\da-fA-F]{2}\.[\da-fA-F])\s*\|"
+    r"\s*(?P<aicore>-|\d+)\s+(?P<rest>[\d\s/]+)\|"
+)
+# ---- 25.2 格式（910B4 单 chip 实测）：chip 行只有 chip 一列（无 phy 列）----
+# | 0                         | 0000:C1:00.0  | 0    0/0    3451/65536 |
+_DEVICE_25_RE = re.compile(
+    r"^\|\s*(?P<chip>\d+)\s*\|"
     r"\s*(?P<bus>[\da-fA-F]{4}:[\da-fA-F]{2}:[\da-fA-F]{2}\.[\da-fA-F])\s*\|"
     r"\s*(?P<aicore>-|\d+)\s+(?P<rest>[\d\s/]+)\|"
 )
@@ -144,6 +154,23 @@ def _merge_chip(card: dict[str, Any], chip: dict[str, Any]) -> None:
         card["mem_total_mb"] = chip["mem_total_mb"]
 
 
+def _build_chip(matched: re.Match, summary: dict[str, Any]) -> dict[str, Any]:
+    """从 device 行匹配 + 概要行暂存构造 chip 记录。显存取最后一组数字对（HBM）。"""
+    pairs = _PAIR_RE.findall(matched.group("rest"))
+    hbm_used, hbm_total = (int(pairs[-1][0]), int(pairs[-1][1])) if pairs else (None, None)
+    bus = matched.groupdict().get("bus")
+    return {
+        "name": summary["name"],
+        "health": summary["health"],
+        "power_w": summary["power_w"],
+        "temp_c": summary["temp_c"],
+        "bus_id": bus if bus and bus != "NA" else None,
+        "aicore_util": _to_int(matched.group("aicore")),
+        "mem_used_mb": hbm_used,
+        "mem_total_mb": hbm_total,
+    }
+
+
 def parse_npu_smi_output(text: str) -> dict[str, Any]:
     """把 npu-smi info 的文本输出解析成结构化数据。"""
     npus: dict[int, dict[str, Any]] = {}
@@ -179,41 +206,11 @@ def parse_npu_smi_output(text: str) -> dict[str, Any]:
                 )
             continue
 
-        # device 行：bus-id 严格格式 + 只在等待配对时接受
-        matched = _DEVICE_RE.match(line)
+        # device 行：三种列布局（24/26 两列 chip+phy、25.2 单列 chip、950 无 chip 列），
+        # bus-id 严格格式区分概要行/进程行，只在等待配对时接受
+        matched = _DEVICE_RE.match(line) or _DEVICE_25_RE.match(line) or _DEVICE_950_RE.match(line)
         if matched and pending_summary is not None:
-            pairs = _PAIR_RE.findall(matched.group("rest"))
-            hbm_used, hbm_total = (int(pairs[-1][0]), int(pairs[-1][1])) if pairs else (None, None)
-            chip = {
-                "name": pending_summary["name"],
-                "health": pending_summary["health"],
-                "power_w": pending_summary["power_w"],
-                "temp_c": pending_summary["temp_c"],
-                "bus_id": matched.group("bus"),
-                "aicore_util": _to_int(matched.group("aicore")),
-                "mem_used_mb": hbm_used,
-                "mem_total_mb": hbm_total,
-            }
-            _merge_chip(card(pending_summary["id"]), chip)
-            pending_summary = None
-            continue
-
-        # 950 系 device 行：前两列空、bus 列常为 NA（与 24/26 的区别：无 chip/phy 列）
-        matched = _DEVICE_950_RE.match(line)
-        if matched and pending_summary is not None:
-            pairs = _PAIR_RE.findall(matched.group("rest"))
-            hbm_used, hbm_total = (int(pairs[-1][0]), int(pairs[-1][1])) if pairs else (None, None)
-            chip = {
-                "name": pending_summary["name"],
-                "health": pending_summary["health"],
-                "power_w": pending_summary["power_w"],
-                "temp_c": pending_summary["temp_c"],
-                "bus_id": None,
-                "aicore_util": _to_int(matched.group("aicore")),
-                "mem_used_mb": hbm_used,
-                "mem_total_mb": hbm_total,
-            }
-            _merge_chip(card(pending_summary["id"]), chip)
+            _merge_chip(card(pending_summary["id"]), _build_chip(matched, pending_summary))
             pending_summary = None
             continue
 

@@ -113,6 +113,24 @@ def read_password(args: argparse.Namespace) -> str | None:
     return args.password
 
 
+def normalize_tags(raw: list[str]) -> tuple[list[str], str | None]:
+    """归一化标签：strip、去重、保序。返回 (tags, 错误说明)；错误说明非空表示非法。
+
+    规则与 fleet_service 的面板 API 一致：最多 20 个、单个 32 字符。
+    """
+    tags: list[str] = []
+    for tag in raw:
+        tag = tag.strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    if len(tags) > 20:
+        return [], "最多 20 个标签"
+    for tag in tags:
+        if len(tag) > 32:
+            return [], f"标签超过 32 字符: {tag!r}"
+    return tags, None
+
+
 def probe_machine_meta(host: str, port: int, user: str) -> dict[str, Any]:
     """采集机器元数据：hostname、系统、CPU 核数，以及 NPU 概况。"""
     script = (
@@ -142,18 +160,43 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=22, help="SSH 端口，默认 22")
     parser.add_argument("--user", default="root", help="SSH 用户，默认 root")
     parser.add_argument("--alias", help="机器别名，默认使用 host")
+    parser.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help="机器标签，可重复（如 --tag a3 --tag 910）；最多 20 个、单个 32 字符",
+    )
     parser.add_argument("--password-stdin", action="store_true", help="从 stdin 读密码（推荐）")
     parser.add_argument("--password-env", help="从该环境变量读密码（推荐）")
     parser.add_argument("--password", help="明文密码（仅当密码已出现在当前对话中时使用）")
     args = parser.parse_args()
 
+    tags, tag_error = normalize_tags(args.tag)
+    if tag_error:
+        return emit(
+            {
+                "ok": False,
+                "action": "add",
+                "status": "blocked",
+                "machine": {"host": args.host, "port": args.port, "user": args.user},
+                "error": f"invalid tags: {tag_error}",
+            }
+        )
+
     identifier = f"{args.host}:{args.port}"
     progress("start", f"add {identifier}")
 
-    # 幂等：已登记的机器不重复 add
+    # 幂等：已登记的机器不重复 add；带 --tag 时合并补标签（不动其他字段）
     existing = find_machine(identifier) or find_machine(args.host)
     if existing:
         _index, machine = existing
+        if tags:
+            current = [t for t in (machine.get("tags") or []) if isinstance(t, str)]
+            merged = current + [t for t in tags if t not in current]
+            if merged != current:
+                machine["tags"] = merged
+                upsert_machine(machine)
         ok, detail = ssh_key_ok(machine["host"], int(machine.get("port", 22)), machine.get("user", "root"))
         return emit(
             {
@@ -224,6 +267,8 @@ def main() -> int:
         "user": args.user,
         "added_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "auth": "key",
+        "tags": tags,
+        "enabled": True,
         "password_used_for_bootstrap": password_used,
     }
     meta = probe_machine_meta(args.host, args.port, args.user)

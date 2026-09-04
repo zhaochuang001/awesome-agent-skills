@@ -49,6 +49,17 @@ CLIENT_FRESH_WINDOW_SECONDS = 120.0    # 客户端活跃判定窗口
 MACHINE_EXTRA_INTERVAL_SECONDS = 300.0  # 磁盘/挂载/Docker/负载的低频采集间隔
 PROBE_TIMEOUT_SECONDS = 45.0
 MACHINE_PROBE_TIMEOUT_SECONDS = 30.0
+PROBE_WORKERS = 16  # 探测线程池并发数（77+ 台集群规模下 8 并发一轮耗时过长）
+
+
+def probe_window_seconds(machine_count: int) -> float:
+    """as_completed 收割窗口：随机器数自适应，避免大规模集群下慢机器被截断漏采。
+
+    估算：单机最坏 ~80s（连接 20 + NPU 30 + extras 30），PROBE_WORKERS 并发下的
+    排队成本约每台 80/16=5s。窗口只是兜底——全部完成时 as_completed 立即返回，
+    加大它不会拖慢正常轮次。
+    """
+    return max(PROBE_TIMEOUT_SECONDS + 10, machine_count * 5.0)
 
 # 前端静态文件目录（web/ 与 scripts/ 同级）
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
@@ -214,7 +225,7 @@ def probe_all(
     snapshot_hosts: dict[str, dict[str, Any]] = {}
     fresh_extras: set[str] = set()
     try:
-        for future in as_completed(futures, timeout=PROBE_TIMEOUT_SECONDS + 10):
+        for future in as_completed(futures, timeout=probe_window_seconds(len(machines))):
             machine = futures[future]
             try:
                 entry = future.result()
@@ -557,7 +568,7 @@ def main() -> int:
     state = FleetState()
     state.load_cache()
     history = FleetHistory()
-    executor = ThreadPoolExecutor(max_workers=8)
+    executor = ThreadPoolExecutor(max_workers=PROBE_WORKERS)
     stop_event = threading.Event()
     last_extra_ts: dict[str, float] = {}
 

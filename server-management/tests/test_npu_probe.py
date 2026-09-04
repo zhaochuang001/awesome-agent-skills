@@ -80,6 +80,32 @@ SAMPLE_OUTPUT_26 = """
 """
 
 
+# 真实 npu-smi 25.2.0 输出格式（910B4 单 chip：chip 行只有 chip 一列，无 phy 列；
+# 第三列 Memory-Usage 与 HBM-Usage 两组数字对，HBM 是最后一组）
+SAMPLE_OUTPUT_25 = """
++------------------------------------------------------------------------------------------------+
+| npu-smi 25.2.0                   Version: 25.2.0                                               |
++---------------------------+---------------+----------------------------------------------------+
+| NPU   Name                | Health        | Power(W)    Temp(C)           Hugepages-Usage(page)|
+| Chip                      | Bus-Id        | AICore(%)   Memory-Usage(MB)  HBM-Usage(MB)        |
++===========================+===============+====================================================+
+| 0     910B4-1             | OK            | 91.8        36                0    / 0             |
+| 0                         | 0000:C1:00.0  | 0           0    / 0          3451 / 65536         |
++===========================+===============+====================================================+
+| 1     910B4-1             | OK            | 89.4        37                0    / 0             |
+| 0                         | 0000:C2:00.0  | 0           0    / 0          3436 / 65536         |
++===========================+===============+====================================================+
+| 7     910B4-1             | Alarm         | 310.5       88                0    / 0             |
+| 0                         | 0000:42:00.0  | 96          0    / 0          65000 / 65536        |
++===========================+===============+====================================================+
++---------------------------+---------------+----------------------------------------------------+
+| NPU     Chip              | Process id    | Process name             | Process memory(MB)      |
++===========================+===============+====================================================+
+| No running processes found in NPU 0                                                    |
++===========================+===============+====================================================+
+"""
+
+
 def test_parse_basic_fields():
     result = parse_npu_smi_output(SAMPLE_OUTPUT)
     assert result["npu_count"] == 3
@@ -170,6 +196,27 @@ def test_parse_950_format():
     assert card7["health"] == "Warning"
     assert card7["aicore_util"] == 42
     assert card7["mem_used_mb"] == 91000
+
+
+def test_parse_910b4_single_chip_column():
+    # 25.2 格式：chip 行只有 chip 一列（无 phy 列），不能与 24/26 的双列格式混淆
+    result = parse_npu_smi_output(SAMPLE_OUTPUT_25)
+    assert result["npu_count"] == 3
+    first = result["npus"][0]
+    assert first["id"] == 0
+    assert first["name"] == "910B4-1"
+    assert first["health"] == "OK"
+    assert first["power_w"] == 91.8
+    assert first["temp_c"] == 36.0
+    assert first["bus_id"] == "0000:C1:00.0"
+    assert first["aicore_util"] == 0
+    # 显存取最后一组数字对（HBM 3451/65536），不是 Memory-Usage（0/0）
+    assert first["mem_used_mb"] == 3451
+    assert first["mem_total_mb"] == 65536
+    # 进程表区域（No running processes 行）不产生卡记录
+    card7 = [n for n in result["npus"] if n["id"] == 7][0]
+    assert card7["health"] == "Alarm"
+    assert card7["aicore_util"] == 96
 
 
 def test_infer_machine_type():

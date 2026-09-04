@@ -29,7 +29,7 @@ from common import (  # noqa: E402
     load_inventory,
     progress,
 )
-from fleet_service import probe_one_machine  # noqa: E402
+from fleet_service import PROBE_WORKERS, probe_one_machine  # noqa: E402
 from npu_probe import summarize_fleet  # noqa: E402
 
 LOCAL_PROBE_TIMEOUT_SECONDS = 60.0
@@ -64,10 +64,13 @@ def probe_local() -> dict[str, Any]:
     progress("local-probe", "fleet 服务未运行，本地并行探测一次")
     machines = load_inventory()
     result: dict[str, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=PROBE_WORKERS) as executor:
         futures = {executor.submit(probe_one_machine, m): m for m in machines}
         try:
-            for future in as_completed(futures, timeout=LOCAL_PROBE_TIMEOUT_SECONDS + 15):
+            # 收割窗口随机器数自适应（与 fleet_service.probe_window_seconds 同思路）
+            for future in as_completed(
+                futures, timeout=max(LOCAL_PROBE_TIMEOUT_SECONDS + 15, len(machines) * 5.0)
+            ):
                 try:
                     entry = future.result()
                 except Exception as exc:  # noqa: BLE001 - 单机失败不拖垮整体
@@ -101,9 +104,21 @@ def collect_fleet(live: bool) -> dict[str, Any]:
     return probe_local()
 
 
-def cmd_servers(live: bool) -> int:
+def cmd_servers(live: bool, tags: list[str]) -> int:
     progress("start", "fleet servers")
-    return emit({"ok": True, "action": "fleet-servers", "status": "ready", **collect_fleet(live)})
+    data = collect_fleet(live)
+    if tags:
+        wanted = {t.strip().lower() for t in tags if t.strip()}
+        machines = data.get("machines") or {}
+        filtered = {
+            host: entry
+            for host, entry in machines.items()
+            if wanted & {str(t).lower() for t in (entry.get("tags") or [])}
+        }
+        data["machines"] = filtered
+        data["summary"] = summarize_fleet(filtered)
+        data["tag_filter"] = sorted(wanted)
+    return emit({"ok": True, "action": "fleet-servers", "status": "ready", **data})
 
 
 def cmd_status_host(host: str, live: bool) -> int:
@@ -191,6 +206,9 @@ def main() -> int:
 
     p_servers = sub.add_parser("servers", help="列出全部机器与 NPU 状态")
     p_servers.add_argument("--live", action="store_true", help="触发即时探测（默认读缓存）")
+    p_servers.add_argument(
+        "--tag", action="append", default=[], metavar="TAG", help="按标签过滤（可重复，命中任一即保留）"
+    )
 
     p_status = sub.add_parser("status", help="查询单台机器")
     p_status.add_argument("machine", help="别名、IP 或 IP:端口")
@@ -204,7 +222,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "servers":
-        return cmd_servers(args.live)
+        return cmd_servers(args.live, args.tag)
     if args.command == "status":
         return cmd_status_host(args.machine, args.live)
     return cmd_capacity(args.min_idle, args.max_age, args.live)

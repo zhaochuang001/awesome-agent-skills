@@ -15,7 +15,7 @@ description: 管理用户的服务器清单：添加服务器（用密码一次�
 
 | 意图 | 脚本 | 语义 |
 | --- | --- | --- |
-| 添加/配置服务器（用户给了 IP，可能附带密码） | `scripts/machine_add.py --host <ip> [--user root] [--port 22] [--alias <名>]` + 密码参数 | 幂等：已登记的机器转验证路径 |
+| 添加/配置服务器（用户给了 IP，可能附带密码） | `scripts/machine_add.py --host <ip> [--user root] [--port 22] [--alias <名>] [--tag <标签>]` + 密码参数 | 幂等：已登记的机器转验证路径；`--tag` 合并补标签 |
 | 移除服务器 | `scripts/machine_remove.py --machine <别名或ip>` | 只删本地登记，见删除边界 |
 | 检查某台机器 | `scripts/machine_verify.py --machine <别名或ip>` | 只读，不修复 |
 | 集群查询（有哪些机器/空闲卡/健康） | `scripts/fleet_cli.py servers\|status\|capacity` | 读缓存或 `--live` 即时探测 |

@@ -27,7 +27,8 @@
 
 ## inventory 契约
 
-- 位置 `~/.server-management/inventory.json`，字段：`alias`、`host`、`port`、`user`、`added_at`、`auth`、`npu_count`、`npu_name`、`machine_type`、`last_verified_at`、远端主机元数据。
+- 位置 `~/.server-management/inventory.json`，字段：`alias`、`host`、`port`、`user`、`added_at`、`auth`、`tags`、`enabled`、`npu_count`、`npu_name`、`machine_type`、`last_verified_at`、远端主机元数据。
+- `tags` 是用户指定的机器标签（kebab-case，如 `a3`、`a5-dt-pod`），与探测推断的 `machine_type`（NPU 型号）正交；上限 20 个、单个 32 字符。`machine_add.py --tag` 可重复传入，对已登记机器重复 add 时合并标签不覆盖；`fleet_cli.py servers --tag x` 按标签过滤（大小写不敏感，命中任一即保留）。
 - 机器唯一键是 `host:port`；alias 只是展示名，`find_machine` 接受 alias / host / `host:port` 三种标识。
 - 写入原子化：临时文件 + `os.replace`。
 - `machine_type` 从 NPU 名称推断（910B* -> 910B、910C* -> 910C、310P* -> 310P），仅元数据用途；无法推断时为 `unknown`，不要编造。
